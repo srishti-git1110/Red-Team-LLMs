@@ -1,6 +1,12 @@
-from pydantic import BaseModel
-from transformers import pipeline, TextGenerationPipeline
+# section 4.2 of https://arxiv.org/pdf/2302.08582.pdf
+import math
 import argparse
+import Optional
+from srsly import read_jsonl
+from pydantic import BaseModel
+
+import wandb
+from transformers import pipeline, TextGenerationPipeline
 
 class CandidatePrompt(BaseModel):
   '''
@@ -28,5 +34,27 @@ class CandidatePrompt(BaseModel):
 
 
 class PromptPool(BaseModel):
+  '''
+  Represents the prompt pool P.
+
+  Attributes:
+    prompts: dict[str, CandidatePrompt] - dict storing the prompt pool P. 
+    beta: float - scaling parameter used to calculate prompt weights (step 2 of the algo)
+  '''
+  prompts: dict[str, CandidatePrompt]
+  beta: float = 1.0
+
+  @classmethod
+  def from_json(cls, path:str, limit:int = 20, **kwargs):
+    prompts = {
+      prompt['text']: CandidatePrompt(text=prompt['text'], scores=[1e-3])
+      for prompt in list(read_jsonl(path))[:limit]
+    }
+
+    return cls(prompts=prompts, **kwargs)
+
+
+
+  
   
 
