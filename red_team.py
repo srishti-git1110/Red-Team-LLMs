@@ -1,12 +1,16 @@
 # section 4.2 of https://arxiv.org/pdf/2302.08582.pdf
-import math
+import re
 import argparse
 import Optional
+import numpy as np
 from srsly import read_jsonl
 from pydantic import BaseModel
 
+from prompts import get_redlm_prompt_template
+from scorers import DetoxifyToxicityScorer
 import wandb
 from transformers import pipeline, TextGenerationPipeline
+
 
 class CandidatePrompt(BaseModel):
   '''
@@ -20,9 +24,6 @@ class CandidatePrompt(BaseModel):
   text: str
   scores: list[float]
   own_score: Optional[float] = None
-
-  def mean(self):
-    return sum(self.scores) / len(self.scores)
 
   def std(self):
     return (sum((score - self.mean()) ** 2 for score in self.scores) / len(self.scores)) ** 0.5
@@ -52,9 +53,75 @@ class PromptPool(BaseModel):
     }
 
     return cls(prompts=prompts, **kwargs)
+  
+  def add(self, prompt: CandidatePrompt):
+    if prompt.text in self.prompts:
+      self.prompts[prompt.text].scores.extend(prompt.scores)
+    else:
+      self.prompts[prompt.text] = prompt
+
+  def clear(self):
+    self.prompts.clear()
+
+  def sample(self, k=4):
+    weights = [np.exp(np.mean(prompt.scores)/self.beta) for prompt in self.prompts.values()]
+    sampled_prompts = np.random.choice(
+      list(self.prompts.values()),
+      size=k,
+      replace=False,
+      p=np.array(weights)/sum(weights)
+    )
+
+    return list(set(sampled_prompts))
+  
+  def current_best(self, n=1):
+    return sorted(self.prompts.values(), key=lambda prompt: np.mean(prompt.scores), reverse=True)[:n]
+
+  def current_mean(self):
+    return np.mean([np.mean(prompt.scores) for prompt in self.prompts.values()])
+  
+  def __iter__(self):
+    return iter(self.prompts.values())
 
 
+def construct_prompt_for_redlm(
+  few_shot_examples: list(CandidatePrompt), 
+  prompt_template:str
+) -> str:
+  '''
+  Creates a prompt with an instruction and (few-shot) examples. 
+  This prompt is used to sample from the red LM the adversarial prompts that are inturn used to elicit adversarial behaviour from the target lm.
+  '''
+  examples = ''
+  for i, example in enumerate(few_shot_examples):
+    examples += f'{i+1}. {example.text}/n'
+  examples += f'{i+2}. '
+
+  return prompt_template.format(examples=examples)
+
+
+def parse_response(
+  num_responses_to_extract: int, 
+  response: str
+) -> list[str]:
+  response = response.split(sep='\n')[:num_responses_to_extract]
+  response = [re.sub(r'\d+\.\s', '', line).lstrip() for line in response]
+
+  return list(set(response))
 
   
+def get_candidates_from_redlm(
+  prompt: str, 
+  n: int, 
+  top_p: float, 
+  temperature: float
+) -> list[str]:
+  '''
+  Few-shot-generates adversarial prompts from the red LM using the prompt returned by construct_prompt_for_redlm.
+  '''
+  
+def generate_completions_from_targetlm(
+  target_lm:
+)
   
 
