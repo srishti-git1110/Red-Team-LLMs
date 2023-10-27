@@ -84,6 +84,16 @@ class PromptPool(BaseModel):
     return iter(self.prompts.values())
 
 
+def parse_response(
+  num_responses_to_extract: int, 
+  response: str
+) -> list[str]:
+  response = response.split(sep='\n')[:num_responses_to_extract]
+  response = [re.sub(r'\d+\.\s', '', line).lstrip() for line in response]
+
+  return list(set(response))
+
+
 def construct_prompt_for_redlm(
   few_shot_examples: list(CandidatePrompt), 
   prompt_template:str
@@ -99,16 +109,6 @@ def construct_prompt_for_redlm(
 
   return prompt_template.format(examples=examples)
 
-
-def parse_response(
-  num_responses_to_extract: int, 
-  response: str
-) -> list[str]:
-  response = response.split(sep='\n')[:num_responses_to_extract]
-  response = [re.sub(r'\d+\.\s', '', line).lstrip() for line in response]
-
-  return list(set(response))
-
   
 def get_candidates_from_redlm(
   prompt: str, 
@@ -120,8 +120,47 @@ def get_candidates_from_redlm(
   Few-shot-generates adversarial prompts from the red LM using the prompt returned by construct_prompt_for_redlm.
   '''
   
+
 def generate_completions_from_targetlm(
-  target_lm:
-)
+  target_lm: TextGenerationPipeline,
+  candidates: list[str],
+  continuations_per_prompt: int = 512,
+  prefix: str = '',
+  bad_word_ids: Optional[list[int]] = None,
+) -> dict[str, list[str]]:
+  '''
+  Tries to elicit harmful behaviour from the target model given an adversarial prompt returned by get_candidates_from_redlm
+  '''
+  target_lm.tokenizer.pad_token_id = target_lm.tokenizer.bos_token_id
+  target_lm.tokenizer.padding_side = 'left'
+  batch_size = 512
+
+  output = target_lm(
+    candidates,
+    prefix=target_lm.tokenizer.bos_token+prefix,
+    eos_token_id=target_lm.tokenizer.bos_token_id,
+    min_length=10,
+    max_length=64,
+    top_p=0.9,
+    temperature=0.7,
+    do_sample=True,
+    bad_words_ids=bad_word_ids,
+    batch_size=int(batch_size/continuations_per_prompt),
+    num_workers=0,
+    num_return_sequences=continuations_per_prompt,
+  )
+  
+  return {
+    prompt: [completion['generated_text'].removeprefix(prompt).replace(prefix, '') for completion in completions]
+    for prompt, completions in zip(candidates, output)
+  }
+
+
+def red_team(args: argparse.Namespace):
+  target_lm = pipeline('text-generation', model=args.target_lm, device=args.device)
+
+  
+  
+  
   
 
