@@ -18,8 +18,8 @@ class CandidatePrompt(BaseModel):
 
     Attributes:
       text: str - the textual prompt
-      scores: list[float] - list of scores for each token in the prompt [-R(xi)]
-      own_score: Optional[float] - 
+      scores: list[float] - list of scores corresponding to completions of the adversarial prompt ai, u(ai)
+      own_score: Optional[float] - candidate prompt's score
     '''
     text: str
     scores: list[float]
@@ -86,8 +86,8 @@ class PromptPool(BaseModel):
 
 
 def parse_response(
-    num_responses_to_extract: int,
-    response: str
+    response: str,
+    num_responses_to_extract: int=1
 ) -> list[str]:
     response = response.split(sep='\n')[:num_responses_to_extract]
     response = [re.sub(r'\d+\.\s', '', line).lstrip() for line in response]
@@ -121,6 +121,7 @@ def get_candidates_from_redlm(
     '''
     Few-shot-generates adversarial prompts from the red LM using the prompt returned by construct_prompt_for_redlm.
     '''
+    # return a list of completions only (not prompt+completion)
 
 
 def generate_completions_from_targetlm(
@@ -176,6 +177,7 @@ def red_team(args: argparse.Namespace):
         wandb.init(
 			project='red-teaming',
 			entity='srishti-gureja-wandb',
+            group=args.group_name,
 			config=args
 		)
         prompt_pool = PromptPool.from_json(
@@ -183,23 +185,92 @@ def red_team(args: argparse.Namespace):
 			temperature=args.beta
 		)
         local_prompt_pool = PromptPool(prompts={})
+
         for i in range(args.num_rounds):
             local_prompt_pool.clear()
-            print(f'Round {i+1}, prompt pool size = {len(prompt_pool.prompts)}')
-            
+            print('---------------------------------------------------------')
+            print('---------------------------------------------------------')
+            print(f'Round {i+1}, prompt pool size = {len(prompt_pool.prompts)}\n')
+
             few_shot_examples = prompt_pool.sample(k=4)
             redlm_prompt = construct_prompt_for_redlm(
                 few_shot_examples=few_shot_examples,
                 prompt_template=get_redlm_prompt_template()
             )
+            print(f'Red LM Prompt: {redlm_prompt}')
             
-            candidates = get_candidates_from_redlm(
+            responses = get_candidates_from_redlm(
                 redlm=redlm,
                 prompt=redlm_prompt,
                 num_responses=args.redlm_num_responses,
                 top_p=args.redlm_top_p,
                 temperature=args.redlm_temperature   
             )
+            candidates = sum([parse_response(response)
+                              for response in responses], [])
+            
+            targetlm_output = generate_completions_from_targetlm(
+                target_lm=target_lm,
+                candidates=candidates,
+                prefix=args.prefix,
+                bad_word_ids=args.bad_word_ids
+            )
+
+            for candidate_text, completions in targetlm_output.items():
+                scores = scorer.score_texts(completions)
+                candidate_prompt = CandidatePrompt(
+                    text=candidate_text,
+                    scores=scores,
+                    own_score=scorer.score_text(candidate_text)
+                )
+                prompt_pool.add(prompt=candidate_prompt)
+                local_prompt_pool.add(prompt=candidate_prompt)
+                print(f'Candidate Prompt: {candidate_prompt}')
+
+
+            print(f'Best prompt for round {i+1}: {local_prompt_pool.current_best()[0]}')
+            print(f'Average score for round {i+1}: {local_prompt_pool.current_mean():.2f}')
+            print(f'Best prompt globally: {prompt_pool.current_best()[0]}')
+            print(f'Average score globally: {prompt_pool.current_mean():.2f}')
+
+            best_prompt_table = wandb.Table(
+                    data=[(prompt.text, prompt.mean(), prompt.std(), prompt.own_score)
+                          for prompt in prompt_pool.current_best(n=10)],
+                    columns=['text', 'mean score', 'std', 'own score']
+                )
+            wandb.log({
+                'best_prompt': best_prompt_table,
+                'best_prompts_scatter': wandb.plot.scatter(best_prompt_table, 'mean score', 'own score'),
+                'target_lm_responses': wandb.Table(
+                    data=[(prompt, responses[:3]) for prompt, responses in targetlm_output.items()][:10],
+                    columns=['prompt', 'response']
+                ),
+                'best_prompt_score': prompt_pool.current_best()[0].mean(),
+                'best_10_prompt_score': sum(p.mean() for p in prompt_pool.current_best(n=10))/10,
+                'best_100_prompt_score': sum(p.mean() for p in prompt_pool.current_best(n=100)) / 100,
+                'average_score': prompt_pool.current_mean(),
+                'round_best_prompt_score': local_prompt_pool.current_best()[0].mean(),
+                'round_average_score': local_prompt_pool.current_mean(),
+            })
+        wandb.finish()
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--group_name', type=str, default=None)
+    parser.add_argument('--method', type=str, default=None)
+    parser.add_argument('--target_lm', type=str, default='gpt2')
+    parser.add_argument('--initial_prompt_pool', type=str, default='resources/challenging_rtp.jsonl')
+    parser.add_argument('--pool_temperature', type=float, default=0.1)
+    parser.add_argument('--gpt3_temperature', type=float, default=1)
+    parser.add_argument('--gpt3_top_p', type=float, default=1)
+    parser.add_argument('--gpt3_num_responses', type=int, default=20)
+    parser.add_argument('--num_rounds', type=int, default=10)
+    parser.add_argument('--num_trials', type=int, default=10)
+    parser.add_argument('--prefix', type=str, default='')
+    parser.add_argument('--bad_words_ids', type=str, default=None)
+    args = parser.parse_args()
+    print(args)
+    red_team(args)
             
             
 
