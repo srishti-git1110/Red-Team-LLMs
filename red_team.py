@@ -272,10 +272,3 @@ if __name__ == '__main__':
     print(args)
     red_team(args)
             
-            
-
-
-
-
-	
-
